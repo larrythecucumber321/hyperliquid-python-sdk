@@ -136,6 +136,36 @@ class BasicAdder:
             with open("fills", "a+") as f:
                 f.write(json.dumps(user_events_data["fills"]))
                 f.write("\n")
+
+            # Fill gap created from market order w/ opposite type
+            order = user_events_data["fills"][0]
+            side = "A" if order["side"] == "B" else "B"
+            sz = float(order["sz"])
+            filled_px = float(order["px"])
+
+            # Set price as DEPTH away from settlement price
+            ideal_distance = filled_px * DEPTH
+
+            ideal_price = filled_px + \
+                (ideal_distance * (side_to_int(side)))
+
+            px = float(f"{ideal_price:.5g}")
+
+            print(f"placing gap fill order sz:{sz} px:{px} side:{side}")
+            self.provide_state[side] = {
+                "type": "in_flight_order", "time": get_timestamp_ms()}
+            response = self.exchange.order(COIN, side == "B", sz, px, {
+                "limit": {"tif": "Alo"}})
+            print("placed order", response)
+            if response["status"] == "ok":
+                status = response["response"]["data"]["statuses"][0]
+                if "resting" in status:
+                    self.provide_state[side] = {
+                        "type": "resting", "px": px, "oid": status["resting"]["oid"]}
+                else:
+                    print(
+                        "Unexpected response from placing order. Setting position to None.", response)
+                    self.provide_state[side] = {"type": "cancelled"}
         # Set the position to None so that we don't place more orders without knowing our position
         # You might want to also update provide_state to account for the fill. This could help avoid sending an
         # unneeded cancel or failing to send a new order to replace the filled order, but we skipped this logic
