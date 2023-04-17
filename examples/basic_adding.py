@@ -5,24 +5,24 @@ import threading
 import time
 
 import eth_account
+import utils
 from eth_account.signers.local import LocalAccount
 
-import utils
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 from hyperliquid.utils.signing import get_timestamp_ms
 from hyperliquid.utils.types import (
-    L2BookMsg,
-    L2BookSubscription,
-    UserEventsMsg,
-    Side,
     SIDES,
     Dict,
-    TypedDict,
-    Optional,
+    L2BookMsg,
+    L2BookSubscription,
     Literal,
+    Optional,
+    Side,
+    TypedDict,
     Union,
+    UserEventsMsg,
 )
 
 # How far from the best bid and offer this strategy ideally places orders. Currently set to .3%
@@ -42,9 +42,10 @@ MAX_POSITION = 1.0
 COIN = "ETH"
 
 InFlightOrder = TypedDict("InFlightOrder", {"type": Literal["in_flight_order"], "time": int})
+Gap = TypedDict("Gap", {"type": Literal["gap"], "px": float, "oid": int})
 Resting = TypedDict("Resting", {"type": Literal["resting"], "px": float, "oid": int})
 Cancelled = TypedDict("Cancelled", {"type": Literal["cancelled"]})
-ProvideState = Union[InFlightOrder, Resting, Cancelled]
+ProvideState = Union[InFlightOrder, Resting, Cancelled, Gap]
 
 
 def side_to_int(side: Side) -> int:
@@ -85,6 +86,13 @@ class BasicAdder:
                 f"on_book_update book_price:{book_price} ideal_distance:{ideal_distance} ideal_price:{ideal_price}"
             )
 
+            # If gap order out of range, revert to normal "resting"
+            provide_state = self.provide_state[side]
+            if (provide_state["type"] == "gap"):
+                if(abs(book_price - provide_state["px"]) > ALLOWABLE_DEVIATION * ideal_distance):
+                    print("reverting gap type to resting")
+                    self.provide_state[side]['type'] = "resting"      
+                      
             # If a resting order exists, maybe cancel it
             provide_state = self.provide_state[side]
             if provide_state["type"] == "resting":
@@ -133,6 +141,13 @@ class BasicAdder:
         print(user_events)
         user_events_data = user_events["data"]
         if "fills" in user_events_data:
+
+            # Set the position to None so that we don't place more orders without knowing our position
+            # You might want to also update provide_state to account for the fill. This could help avoid sending an
+            # unneeded cancel or failing to send a new order to replace the filled order, but we skipped this logic
+            # to make the example simpler
+            self.position = None
+
             with open("fills", "a+") as f:
                 f.write(json.dumps(user_events_data["fills"]))
                 f.write("\n")
@@ -166,11 +181,6 @@ class BasicAdder:
                     print(
                         "Unexpected response from placing order. Setting position to None.", response)
                     self.provide_state[side] = {"type": "cancelled"}
-        # Set the position to None so that we don't place more orders without knowing our position
-        # You might want to also update provide_state to account for the fill. This could help avoid sending an
-        # unneeded cancel or failing to send a new order to replace the filled order, but we skipped this logic
-        # to make the example simpler
-        self.position = None
 
     def poll(self):
         while True:
@@ -178,7 +188,7 @@ class BasicAdder:
             print("open_orders", open_orders)
             ok_oids = set(self.recently_cancelled_oid_to_time.keys())
             for provide_state in self.provide_state.values():
-                if provide_state["type"] == "resting":
+                if provide_state["type"] == "resting" or provide_state["type"] == "gap":
                     ok_oids.add(provide_state["oid"])
 
             for open_order in open_orders:
@@ -208,7 +218,7 @@ def main():
     config = utils.get_config()
     account = eth_account.Account.from_key(config["secret_key"])
     print("Running with account address:", account.address)
-    BasicAdder(account, constants.TESTNET_API_URL)
+    BasicAdder(account, constants.MAINNET_API_URL)
 
 
 if __name__ == "__main__":
