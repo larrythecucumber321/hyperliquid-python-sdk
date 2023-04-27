@@ -5,29 +5,29 @@ import threading
 import time
 
 import eth_account
-import utils
 from eth_account.signers.local import LocalAccount
 
+import utils
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 from hyperliquid.utils.signing import get_timestamp_ms
 from hyperliquid.utils.types import (
-    SIDES,
-    Dict,
     L2BookMsg,
     L2BookSubscription,
-    Literal,
-    Optional,
-    Side,
-    TypedDict,
-    Union,
     UserEventsMsg,
+    Side,
+    SIDES,
+    Dict,
+    TypedDict,
+    Optional,
+    Literal,
+    Union,
 )
 
 # How far from the best bid and offer this strategy ideally places orders. Currently set to .3%
 # i.e. if the best bid is $1000, this strategy will place a resting bid at $997
-DEPTH = 0.001
+DEPTH = 0.00075
 
 # How far from the target price a resting order can deviate before the strategy will cancel and replace it.
 # i.e. using the same example as above of a best bid of $1000 and targeted depth of .3%. The ideal distance is $3, so
@@ -36,23 +36,17 @@ ALLOWABLE_DEVIATION = 0.5
 
 # The maximum absolute position value the strategy can accumulate in units of the coin.
 # i.e. the strategy will place orders such that it can long up to 1 ETH or short up to 1 ETH
-MAX_POSITION = 0.1
+MAX_POSITION = 100
 
 # The coin to add liquidity on
-COIN = "ETH"
+COIN = "AVAX"
 
-<<<<<<< Updated upstream
-InFlightOrder = TypedDict("InFlightOrder", {"type": Literal["in_flight_order"], "time": int})
-Gap = TypedDict("Gap", {"type": Literal["gap"], "px": float, "oid": int})
-Resting = TypedDict("Resting", {"type": Literal["resting"], "px": float, "oid": int})
-=======
 InFlightOrder = TypedDict(
     "InFlightOrder", {"type": Literal["in_flight_order"], "time": int})
 Resting = TypedDict(
     "Resting", {"type": Literal["resting"], "px": float, "oid": int})
->>>>>>> Stashed changes
 Cancelled = TypedDict("Cancelled", {"type": Literal["cancelled"]})
-ProvideState = Union[InFlightOrder, Resting, Cancelled, Gap]
+ProvideState = Union[InFlightOrder, Resting, Cancelled]
 
 
 def side_to_int(side: Side) -> int:
@@ -66,7 +60,8 @@ def side_to_uint(side: Side) -> int:
 class BasicAdder:
     def __init__(self, wallet: LocalAccount, api_url: str):
         self.info = Info(api_url)
-        self.exchange = Exchange(wallet, api_url)
+        vault = "0xe9e2419f8f5661134fd73e78d14faaf7241d2acb"
+        self.exchange = Exchange(wallet, api_url, vault_address=vault)
         subscription: L2BookSubscription = {"type": "l2Book", "coin": COIN}
         self.info.subscribe(subscription, self.on_book_update)
         self.info.subscribe(
@@ -95,13 +90,6 @@ class BasicAdder:
                 f"on_book_update book_price:{book_price} ideal_distance:{ideal_distance} ideal_price:{ideal_price}"
             )
 
-            # If gap order out of range, revert to normal "resting"
-            provide_state = self.provide_state[side]
-            if (provide_state["type"] == "gap"):
-                if(abs(book_price - provide_state["px"]) > ALLOWABLE_DEVIATION * ideal_distance):
-                    print("reverting gap type to resting")
-                    self.provide_state[side]['type'] = "resting"      
-                      
             # If a resting order exists, maybe cancel it
             provide_state = self.provide_state[side]
             if provide_state["type"] == "resting":
@@ -160,46 +148,14 @@ class BasicAdder:
         print(user_events)
         user_events_data = user_events["data"]
         if "fills" in user_events_data:
-
-            # Set the position to None so that we don't place more orders without knowing our position
-            # You might want to also update provide_state to account for the fill. This could help avoid sending an
-            # unneeded cancel or failing to send a new order to replace the filled order, but we skipped this logic
-            # to make the example simpler
-            self.position = None
-
-            with open("fills", "a+") as f:
+            with open("fills_vault", "a+") as f:
                 f.write(json.dumps(user_events_data["fills"]))
                 f.write("\n")
-
-            # Fill gap created from market order w/ opposite type
-            order = user_events_data["fills"][0]
-            side = "A" if order["side"] == "B" else "B"
-            sz = float(order["sz"])
-            filled_px = float(order["px"])
-
-            # Set price as DEPTH away from settlement price
-            ideal_distance = filled_px * DEPTH
-
-            ideal_price = filled_px + \
-                (ideal_distance * (side_to_int(side)))
-
-            px = float(f"{ideal_price:.5g}")
-
-            print(f"placing gap fill order sz:{sz} px:{px} side:{side}")
-            self.provide_state[side] = {
-                "type": "in_flight_order", "time": get_timestamp_ms()}
-            response = self.exchange.order(COIN, side == "B", sz, px, {
-                "limit": {"tif": "Alo"}})
-            print("placed order", response)
-            if response["status"] == "ok":
-                status = response["response"]["data"]["statuses"][0]
-                if "resting" in status:
-                    self.provide_state[side] = {
-                        "type": "resting", "px": px, "oid": status["resting"]["oid"]}
-                else:
-                    print(
-                        "Unexpected response from placing order. Setting position to None.", response)
-                    self.provide_state[side] = {"type": "cancelled"}
+        # Set the position to None so that we don't place more orders without knowing our position
+        # You might want to also update provide_state to account for the fill. This could help avoid sending an
+        # unneeded cancel or failing to send a new order to replace the filled order, but we skipped this logic
+        # to make the example simpler
+        self.position = None
 
     def poll(self):
         while True:
@@ -207,7 +163,7 @@ class BasicAdder:
             print("open_orders", open_orders)
             ok_oids = set(self.recently_cancelled_oid_to_time.keys())
             for provide_state in self.provide_state.values():
-                if provide_state["type"] == "resting" or provide_state["type"] == "gap":
+                if provide_state["type"] == "resting":
                     ok_oids.add(provide_state["oid"])
 
             for open_order in open_orders:
