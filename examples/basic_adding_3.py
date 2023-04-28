@@ -24,9 +24,24 @@ from hyperliquid.utils.types import (
     Union,
 )
 
-DEPTH = 0.001
+from avellaneda_stoikov_market_maker import AvellanedaStoikovMarketMaker  # Import the class
+
+# Add or update the following constants as required
+GAMMA = 0.005
+K = 0.001
+R = 0.0005
+VOL = 0.02
+DT = 0.05
+# How far from the target price a resting order can deviate before the strategy will cancel and replace it.
+# i.e. using the same example as above of a best bid of $1000 and targeted depth of .3%. The ideal distance is $3, so
+# bids within $3 * 0.5 = $1.5 will not be cancelled. So any bids > $998.5 or < $995.5 will be cancelled and replaced.
 ALLOWABLE_DEVIATION = 0.5
-MAX_POSITION = 20
+
+# The maximum absolute position value the strategy can accumulate in units of the coin.
+# i.e. the strategy will place orders such that it can long up to 1 ETH or short up to 1 ETH
+MAX_POSITION = 300
+
+# The coin to add liquidity on
 COIN = "ARB"
 
 InFlightOrder = TypedDict(
@@ -34,8 +49,7 @@ InFlightOrder = TypedDict(
 Resting = TypedDict(
     "Resting", {"type": Literal["resting"], "px": float, "oid": int})
 Cancelled = TypedDict("Cancelled", {"type": Literal["cancelled"]})
-Gap = TypedDict("Gap", {"type": Literal["gap"], "oid": int})
-ProvideState = Union[InFlightOrder, Resting, Cancelled, Gap]
+ProvideState = Union[InFlightOrder, Resting, Cancelled]
 
 
 def side_to_int(side: Side) -> int:
@@ -50,7 +64,6 @@ class BasicAdder:
     def __init__(self, wallet: LocalAccount, api_url: str):
         self.info = Info(api_url)
         self.exchange = Exchange(wallet, api_url)
-
         subscription: L2BookSubscription = {"type": "l2Book", "coin": COIN}
         self.info.subscribe(subscription, self.on_book_update)
         self.info.subscribe(
@@ -61,6 +74,10 @@ class BasicAdder:
             "B": {"type": "cancelled"},
         }
         self.recently_cancelled_oid_to_time: Dict[int, int] = {}
+
+        # Initialize the market maker with gamma, k, and r values
+        self.market_maker = AvellanedaStoikovMarketMaker(gamma=GAMMA, k=K, r=R)
+
         self.poller = threading.Thread(target=self.poll)
         self.poller.start()
 
@@ -70,72 +87,28 @@ class BasicAdder:
         if book_data["coin"] != COIN:
             print("Unexpected book message, skipping")
             return
+        mid_price = (float(book_data["levels"][0][0]["px"]) +
+                     float(book_data["levels"][1][0]["px"])) / 2
+        spread = float(book_data["levels"][1][0]["px"]) - \
+            float(book_data["levels"][0][0]["px"])
+
         for side in SIDES:
-            book_price = float(book_data["levels"]
-                               [side_to_uint(side)][0]["px"])
-            ideal_distance = book_price * DEPTH
-            ideal_price = book_price + (ideal_distance * (side_to_int(side)))
+            # Calculate the bid and ask quotes using the Avellaneda-Stoikov model
+            quotes = self.market_maker.calculate_quotes(
+                mid_price, spread, self.position, VOL, DT)
+            quote_price, quote_size = quotes["bid"] if side == "B" else quotes["ask"]
+
             logging.debug(
-                f"on_book_update book_price:{book_price} ideal_distance:{ideal_distance} ideal_price:{ideal_price}"
-            )
+                f"on_book_update quote_price:{quote_price} quote_size:{quote_size}")
 
+            # If a resting order exists, maybe cancel it
             provide_state = self.provide_state[side]
-            best_bid = float(book_data["levels"][0][0]["px"])
-            best_ask = float(book_data["levels"][1][0]["px"])
-            if best_ask - best_bid > 2 * ideal_distance:
-                if side == "A":
-                    gap_price = best_bid + ideal_distance * 1.5
-                elif side == "B":
-                    gap_price = best_ask - ideal_distance * 1.5
-
-                if provide_state["type"] != "cancelled":
-                    oid = provide_state["oid"]
-                    print(
-                        f"cancelling order due to gap condition oid: {oid} side: {side} ideal_gap_price: {gap_price} best_ask: {best_ask} best_bid: {best_bid}, book_price: {book_price}")
-
-                    response = self.exchange.cancel(COIN, oid)
-                    if response["status"] == "ok":
-                        self.recently_cancelled_oid_to_time[oid] = get_timestamp_ms(
-                        )
-                        self.provide_state[side] = {"type": "cancelled"}
-                    else:
-                        print(
-                            f"Failed to cancel order {provide_state} {side}", response)
-
-                if self.provide_state[side]["type"] == "cancelled":
-                    if self.position is None:
-                        logging.debug(
-                            "Not placing an order because waiting for next position refresh")
-                        continue
-                    sz = MAX_POSITION + self.position * (side_to_int(side))
-                    if sz * gap_price < 10:
-                        logging.debug(
-                            "Not placing an order because at position limit")
-                        continue
-                    px = float(f"{gap_price:.5g}")
-                    print(f"placing gap order sz:{sz} px:{px} side:{side}")
-                    self.provide_state[side] = {
-                        "type": "in_flight_order", "time": get_timestamp_ms()}
-                    response = self.exchange.order(COIN, side == "B", sz, px, {
-                        "limit": {"tif": "Alo"}})
-                    print("placed gap order", response)
-                    if response["status"] == "ok":
-                        status = response["response"]["data"]["statuses"][0]
-                        if "resting" in status:
-                            self.provide_state[side] = {
-                                "type": "gap", "px": px, "oid": status["resting"]["oid"]}
-                        else:
-                            print(
-                                "Unexpected response from placing gap order. Setting position to None.", response)
-                            self.provide_state[side] = {"type": "cancelled"}
-                            self.position = None
-
             if provide_state["type"] == "resting":
-                distance = abs((ideal_price - provide_state["px"]))
-                if distance > ALLOWABLE_DEVIATION * ideal_distance:
+                distance = abs((quote_price - provide_state["px"]))
+                if distance > ALLOWABLE_DEVIATION * spread:
                     oid = provide_state["oid"]
                     print(
-                        f"cancelling order due to deviation oid:{oid} side:{side} ideal_price:{ideal_price} px:{provide_state['px']}"
+                        f"cancelling order due to deviation oid:{oid} side:{side} ideal_price:{quote_price} px:{provide_state['px']}"
                     )
                     response = self.exchange.cancel(COIN, oid)
                     if response["status"] == "ok":
@@ -155,16 +128,16 @@ class BasicAdder:
             provide_state = self.provide_state[side]
             if provide_state["type"] == "cancelled":
                 if self.position is None:
-                    logging.debug(
+                    print(
                         "Not placing an order because waiting for next position refresh")
                     continue
                 sz = MAX_POSITION + self.position * (side_to_int(side))
-                if sz * ideal_price < 10:
-                    logging.debug(
-                        "Not placing an order because at position limit")
-                    continue
+                # if sz * quote_price < 10:
+                #     print(
+                #         "Not placing an order because at position limit")
+                #     continue
                 # prices should have at most 5 significant digits
-                px = float(f"{ideal_price:.5g}")
+                px = float(f"{quote_price:.5g}")
                 print(f"placing order sz:{sz} px:{px} side:{side}")
                 self.provide_state[side] = {
                     "type": "in_flight_order", "time": get_timestamp_ms()}
@@ -199,12 +172,14 @@ class BasicAdder:
         while True:
             open_orders = self.info.open_orders(self.exchange.wallet.address)
             print("open_orders", open_orders)
+
             ok_oids = set(self.recently_cancelled_oid_to_time.keys())
             for provide_state in self.provide_state.values():
-                if provide_state["type"] == "resting" or provide_state["type"] == "gap":
+                if provide_state["type"] == "resting":
                     ok_oids.add(provide_state["oid"])
 
             for open_order in open_orders:
+                print("Checking open_order:", open_order)
                 if open_order["coin"] == COIN and open_order["oid"] not in ok_oids:
                     print("Cancelling unknown oid", open_order["oid"])
                     self.exchange.cancel(open_order["coin"], open_order["oid"])

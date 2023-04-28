@@ -41,16 +41,10 @@ MAX_POSITION = 0.1
 # The coin to add liquidity on
 COIN = "ETH"
 
-<<<<<<< Updated upstream
-InFlightOrder = TypedDict("InFlightOrder", {"type": Literal["in_flight_order"], "time": int})
-Gap = TypedDict("Gap", {"type": Literal["gap"], "px": float, "oid": int})
-Resting = TypedDict("Resting", {"type": Literal["resting"], "px": float, "oid": int})
-=======
 InFlightOrder = TypedDict(
     "InFlightOrder", {"type": Literal["in_flight_order"], "time": int})
 Resting = TypedDict(
     "Resting", {"type": Literal["resting"], "px": float, "oid": int})
->>>>>>> Stashed changes
 Cancelled = TypedDict("Cancelled", {"type": Literal["cancelled"]})
 ProvideState = Union[InFlightOrder, Resting, Cancelled, Gap]
 
@@ -98,10 +92,10 @@ class BasicAdder:
             # If gap order out of range, revert to normal "resting"
             provide_state = self.provide_state[side]
             if (provide_state["type"] == "gap"):
-                if(abs(book_price - provide_state["px"]) > ALLOWABLE_DEVIATION * ideal_distance):
+                if (abs(book_price - provide_state["px"]) > ALLOWABLE_DEVIATION * ideal_distance):
                     print("reverting gap type to resting")
-                    self.provide_state[side]['type'] = "resting"      
-                      
+                    self.provide_state[side]['type'] = "resting"
+
             # If a resting order exists, maybe cancel it
             provide_state = self.provide_state[side]
             if provide_state["type"] == "resting":
