@@ -27,8 +27,8 @@ from hyperliquid.utils.types import (
 from avellaneda_stoikov_market_maker import AvellanedaStoikovMarketMaker  # Import the class
 
 # Add or update the following constants as required
-GAMMA = 0.005
-K = 0.001
+GAMMA = 0.01
+K = 0.002
 R = 0.0005
 VOL = 0.02
 DT = 0.05
@@ -36,13 +36,6 @@ DT = 0.05
 # i.e. using the same example as above of a best bid of $1000 and targeted depth of .3%. The ideal distance is $3, so
 # bids within $3 * 0.5 = $1.5 will not be cancelled. So any bids > $998.5 or < $995.5 will be cancelled and replaced.
 ALLOWABLE_DEVIATION = 0.5
-
-# The maximum absolute position value the strategy can accumulate in units of the coin.
-# i.e. the strategy will place orders such that it can long up to 1 ETH or short up to 1 ETH
-MAX_POSITION = 100
-
-# The coin to add liquidity on
-COIN = "INJ"
 
 InFlightOrder = TypedDict(
     "InFlightOrder", {"type": Literal["in_flight_order"], "time": int})
@@ -61,10 +54,12 @@ def side_to_uint(side: Side) -> int:
 
 
 class BasicAdder:
-    def __init__(self, wallet: LocalAccount, api_url: str, reconnect_attempts: int = 5):
+    def __init__(self, wallet: LocalAccount, api_url: str, target_coin: str, target_size: float, reconnect_attempts: int = 5):
         self.wallet = wallet
         self.api_url = api_url
         self.reconnect_attempts = reconnect_attempts
+        self.target_size = target_size
+        self.coin = target_coin
         self.info = None
         self.exchange = None
         self.position = None
@@ -80,7 +75,8 @@ class BasicAdder:
     def connect(self):
         self.info = Info(self.api_url)
         self.exchange = Exchange(self.wallet, self.api_url)
-        subscription: L2BookSubscription = {"type": "l2Book", "coin": COIN}
+        subscription: L2BookSubscription = {
+            "type": "l2Book", "coin": self.coin}
         self.info.subscribe(subscription, self.on_book_update)
         self.info.subscribe(
             {"type": "userEvents", "user": self.wallet.address}, self.on_user_events)
@@ -108,7 +104,7 @@ class BasicAdder:
     def on_book_update(self, book_msg: L2BookMsg) -> None:
         logging.debug(f"book_msg {book_msg}")
         book_data = book_msg["data"]
-        if book_data["coin"] != COIN:
+        if book_data["coin"] != self.coin:
             print("Unexpected book message, skipping")
             return
         mid_price = (float(book_data["levels"][0][0]["px"]) +
@@ -135,7 +131,7 @@ class BasicAdder:
                     print(
                         f"cancelling order due to deviation oid:{oid} side:{side} ideal_price:{quote_price} px:{provide_state['px']}"
                     )
-                    response = self.exchange.cancel(COIN, oid)
+                    response = self.exchange.cancel(self.coin, oid)
                     if response["status"] == "ok":
                         self.recently_cancelled_oid_to_time[oid] = get_timestamp_ms(
                         )
@@ -152,7 +148,7 @@ class BasicAdder:
             # If we aren't providing, maybe place a new order
             provide_state = self.provide_state[side]
             if provide_state["type"] == "cancelled":
-                sz = MAX_POSITION + position * (side_to_int(side))
+                sz = self.target_size + position * (side_to_int(side))
                 # if sz * quote_price < 10:
                 #     print(
                 #         "Not placing an order because at position limit")
@@ -162,7 +158,7 @@ class BasicAdder:
                 print(f"placing order sz:{sz} px:{px} side:{side}")
                 self.provide_state[side] = {
                     "type": "in_flight_order", "time": get_timestamp_ms()}
-                response = self.exchange.order(COIN, side == "B", sz, px, {
+                response = self.exchange.order(self.coin, side == "B", sz, px, {
                                                "limit": {"tif": "Alo"}})
                 print("placed order", response)
                 if response["status"] == "ok":
@@ -201,7 +197,7 @@ class BasicAdder:
 
             for open_order in open_orders:
                 print("Checking open_order:", open_order)
-                if open_order["coin"] == COIN and open_order["oid"] not in ok_oids:
+                if open_order["coin"] == self.coin and open_order["oid"] not in ok_oids:
                     print("Cancelling unknown oid", open_order["oid"])
                     self.exchange.cancel(open_order["coin"], open_order["oid"])
 
@@ -214,7 +210,7 @@ class BasicAdder:
 
             user_state = self.info.user_state(self.exchange.wallet.address)
             for position in user_state["assetPositions"]:
-                if position["position"]["coin"] == COIN:
+                if position["position"]["coin"] == self.coin:
                     self.position = float(position["position"]["szi"])
                     print(f"set position to {self.position}")
                     break
@@ -225,10 +221,16 @@ def main():
     # Setting this to logging.DEBUG can be helpful for debugging websocket callback issues
     logging.basicConfig(level=logging.ERROR)
     config = utils.get_config()
-    account = eth_account.Account.from_key(config["secret_key"])
-    print("Running with account address:", account.address)
-    adder = BasicAdder(account, constants.MAINNET_API_URL)
-    adder.reconnect()
+
+    bot_count = 1
+    coin_configs = [
+        {"coin": "ARB", "size": 600}]
+    for x in range(bot_count):
+        account = eth_account.Account.from_key(config["secret_key_" + str(x)])
+        print("Running with account address:", account.address)
+        adder = BasicAdder(account, constants.MAINNET_API_URL,
+                           coin_configs[x]["coin"], coin_configs[x]["size"])
+        adder.reconnect()
 
 
 if __name__ == "__main__":
