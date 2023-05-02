@@ -39,10 +39,10 @@ ALLOWABLE_DEVIATION = 0.5
 
 # The maximum absolute position value the strategy can accumulate in units of the coin.
 # i.e. the strategy will place orders such that it can long up to 1 ETH or short up to 1 ETH
-MAX_POSITION = 600
+MAX_POSITION = 100
 
 # The coin to add liquidity on
-COIN = "ARB"
+COIN = "INJ"
 
 InFlightOrder = TypedDict(
     "InFlightOrder", {"type": Literal["in_flight_order"], "time": int})
@@ -118,8 +118,9 @@ class BasicAdder:
 
         for side in SIDES:
             # Calculate the bid and ask quotes using the Avellaneda-Stoikov model
+            position = self.position if self.position is not None else 0
             quotes = self.market_maker.calculate_quotes(
-                mid_price, spread, self.position, VOL, DT)
+                mid_price, spread, position, VOL, DT)
             quote_price, quote_size = quotes["bid"] if side == "B" else quotes["ask"]
 
             logging.debug(
@@ -151,11 +152,7 @@ class BasicAdder:
             # If we aren't providing, maybe place a new order
             provide_state = self.provide_state[side]
             if provide_state["type"] == "cancelled":
-                if self.position is None:
-                    print(
-                        "Not placing an order because waiting for next position refresh")
-                    continue
-                sz = MAX_POSITION + self.position * (side_to_int(side))
+                sz = MAX_POSITION + position * (side_to_int(side))
                 # if sz * quote_price < 10:
                 #     print(
                 #         "Not placing an order because at position limit")

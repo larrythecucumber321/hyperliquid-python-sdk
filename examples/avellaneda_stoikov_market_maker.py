@@ -16,6 +16,8 @@ class AvellanedaStoikovMarketMaker:
         bid_price = mid_price - m - inventory * delta / 2 - l
         ask_price = mid_price + m + inventory * delta / 2 + l
 
+        if inventory is None or delta is None:
+            return {"bid": (0, 0), "ask": (0, 0)}
         bid_size = (1 / 2) * (1 + inventory * delta / l)
         ask_size = (1 / 2) * (1 - inventory * delta / l)
 
