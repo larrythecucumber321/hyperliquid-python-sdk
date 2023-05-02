@@ -39,7 +39,7 @@ ALLOWABLE_DEVIATION = 0.5
 
 # The maximum absolute position value the strategy can accumulate in units of the coin.
 # i.e. the strategy will place orders such that it can long up to 1 ETH or short up to 1 ETH
-MAX_POSITION = 300
+MAX_POSITION = 600
 
 # The coin to add liquidity on
 COIN = "ARB"
@@ -61,25 +61,49 @@ def side_to_uint(side: Side) -> int:
 
 
 class BasicAdder:
-    def __init__(self, wallet: LocalAccount, api_url: str):
-        self.info = Info(api_url)
-        self.exchange = Exchange(wallet, api_url)
-        subscription: L2BookSubscription = {"type": "l2Book", "coin": COIN}
-        self.info.subscribe(subscription, self.on_book_update)
-        self.info.subscribe(
-            {"type": "userEvents", "user": wallet.address}, self.on_user_events)
-        self.position: Optional[float] = None
-        self.provide_state: Dict[Side, ProvideState] = {
+    def __init__(self, wallet: LocalAccount, api_url: str, reconnect_attempts: int = 5):
+        self.wallet = wallet
+        self.api_url = api_url
+        self.reconnect_attempts = reconnect_attempts
+        self.info = None
+        self.exchange = None
+        self.position = None
+        self.provide_state = {
             "A": {"type": "cancelled"},
             "B": {"type": "cancelled"},
         }
-        self.recently_cancelled_oid_to_time: Dict[int, int] = {}
+        self.recently_cancelled_oid_to_time = {}
 
-        # Initialize the market maker with gamma, k, and r values
         self.market_maker = AvellanedaStoikovMarketMaker(gamma=GAMMA, k=K, r=R)
+        self.poller = None
 
-        self.poller = threading.Thread(target=self.poll)
-        self.poller.start()
+    def connect(self):
+        self.info = Info(self.api_url)
+        self.exchange = Exchange(self.wallet, self.api_url)
+        subscription: L2BookSubscription = {"type": "l2Book", "coin": COIN}
+        self.info.subscribe(subscription, self.on_book_update)
+        self.info.subscribe(
+            {"type": "userEvents", "user": self.wallet.address}, self.on_user_events)
+
+        if self.poller is None or not self.poller.is_alive():
+            self.poller = threading.Thread(target=self.poll)
+            self.poller.start()
+
+    def reconnect(self):
+        attempt = 0
+        while attempt < self.reconnect_attempts:
+            try:
+                self.connect()
+                print("Connected successfully.")
+                break
+            except Exception as e:
+                print(f"Connection failed. Attempt {attempt + 1}: {e}")
+                attempt += 1
+                if attempt < self.reconnect_attempts:
+                    time.sleep(5)
+                else:
+                    print("Failed to reconnect after maximum attempts.")
+                    raise
 
     def on_book_update(self, book_msg: L2BookMsg) -> None:
         logging.debug(f"book_msg {book_msg}")
@@ -206,7 +230,8 @@ def main():
     config = utils.get_config()
     account = eth_account.Account.from_key(config["secret_key"])
     print("Running with account address:", account.address)
-    BasicAdder(account, constants.MAINNET_API_URL)
+    adder = BasicAdder(account, constants.MAINNET_API_URL)
+    adder.reconnect()
 
 
 if __name__ == "__main__":
